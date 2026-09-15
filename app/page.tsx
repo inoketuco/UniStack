@@ -1,184 +1,162 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import { AuthScreen } from "../components/auth/AuthScreen";
+import { ProfilePanel } from "../components/profile/ProfilePanel";
+import { MigrationPrompt } from "../components/migration/MigrationPrompt";
+import { createEvent, deleteAssignment as deleteCloudAssignment, deleteCourse as deleteCloudCourse, loadPlannerData, updateEvent, type PlannerData } from "../lib/data/planner";
+import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import type { Database } from "../types/database";
 
 type EventKind = "LT" | "ST";
-type PlannerEvent = {
-  id: number;
-  title: string;
-  course: string;
-  day: string;
-  start: string;
-  end: string;
-  kind: EventKind;
-  type: string;
-  location: string;
-  color: string;
-};
+type Section = "week" | "calendar" | "assignments" | "courses";
+type Priority = "Low" | "Medium" | "High";
+type AssignmentStatus = "Not Started" | "In Progress" | "Ready to Submit" | "Submitted" | "Completed";
+type Recurrence = "none" | "weekly";
+type PlannerEvent = { id: string | number; title: string; course: string; day: string; date: string; start: string; end: string; kind: EventKind; type: string; location: string; color: string; recurrence: Recurrence; recurrenceEnd?: string; seriesId?: string | number; excludedDates?: string[] };
+type Assignment = { id: string | number; title: string; course: string; dueDate: string; priority: Priority; duration: number; progress: number; status: AssignmentStatus };
+type Course = { id: string | number; name: string; code: string; color: string; lecturer: string; tutor: string; location: string; notes: string };
+type DisplayEvent = PlannerEvent & { occurrenceDate: string };
+type SeriesScope = "occurrence" | "future" | "series";
+
+type EventDraft = Omit<PlannerEvent, "id" | "seriesId" | "excludedDates"> & { id?: string | number; seriesId?: string | number; excludedDates?: string[] };
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const SHORT_DAYS = ["MON", "TUE", "WED", "THU", "FRI"];
+const MONTHS_SHORT = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const COLORS = ["#6c5ce7", "#00a896", "#f08a5d", "#e05676", "#3b82c4"];
-
+const INITIAL_DATE = "2026-09-14";
+const NAV_ITEMS: { id: Section; label: string; icon: string }[] = [{ id: "week", label: "My week", icon: "▦" }, { id: "calendar", label: "Calendar", icon: "○" }, { id: "assignments", label: "Assignments", icon: "✓" }, { id: "courses", label: "Courses", icon: "◇" }];
 const starterEvents: PlannerEvent[] = [
-  { id: 1, title: "Algorithms lecture", course: "CS 214", day: "Monday", start: "09:00", end: "10:30", kind: "LT", type: "Lecture", location: "ICT Theatre 2", color: COLORS[0] },
-  { id: 2, title: "Database lab", course: "CS 221", day: "Monday", start: "13:00", end: "15:00", kind: "LT", type: "Lab", location: "Lab 4", color: COLORS[1] },
-  { id: 3, title: "Networks lecture", course: "CS 218", day: "Tuesday", start: "10:00", end: "11:30", kind: "LT", type: "Lecture", location: "Room 014", color: COLORS[2] },
-  { id: 4, title: "PASS session", course: "CS 214", day: "Wednesday", start: "12:00", end: "13:00", kind: "LT", type: "PASS", location: "Library Hub", color: COLORS[0] },
-  { id: 5, title: "Research methods", course: "IS 205", day: "Thursday", start: "09:00", end: "10:30", kind: "LT", type: "Tutorial", location: "Room 206", color: COLORS[3] },
-  { id: 6, title: "Quiz 2", course: "CS 221", day: "Thursday", start: "14:00", end: "15:00", kind: "ST", type: "Test", location: "Lab 4", color: COLORS[1] },
-  { id: 7, title: "Group project check-in", course: "CS 218", day: "Friday", start: "11:00", end: "12:00", kind: "ST", type: "Study", location: "Student Hub", color: COLORS[2] },
+  { id: 1, title: "Algorithms lecture", course: "CS 214", day: "Monday", date: INITIAL_DATE, start: "09:00", end: "10:30", kind: "LT", type: "Lecture", location: "ICT Theatre 2", color: COLORS[0], recurrence: "weekly", recurrenceEnd: "2026-12-18" },
+  { id: 2, title: "Database lab", course: "CS 221", day: "Monday", date: INITIAL_DATE, start: "13:00", end: "15:00", kind: "LT", type: "Lab", location: "Lab 4", color: COLORS[1], recurrence: "weekly", recurrenceEnd: "2026-12-18" },
+  { id: 3, title: "Networks lecture", course: "CS 218", day: "Tuesday", date: "2026-09-15", start: "10:00", end: "11:30", kind: "LT", type: "Lecture", location: "Room 014", color: COLORS[2], recurrence: "weekly", recurrenceEnd: "2026-12-18" },
+  { id: 4, title: "PASS session", course: "CS 214", day: "Wednesday", date: "2026-09-16", start: "12:00", end: "13:00", kind: "LT", type: "PASS", location: "Library Hub", color: COLORS[0], recurrence: "none" },
+  { id: 5, title: "Research methods", course: "IS 205", day: "Thursday", date: "2026-09-17", start: "09:00", end: "10:30", kind: "LT", type: "Tutorial", location: "Room 206", color: COLORS[3], recurrence: "weekly", recurrenceEnd: "2026-12-18" },
+  { id: 6, title: "Quiz 2", course: "CS 221", day: "Thursday", date: "2026-09-17", start: "14:00", end: "15:00", kind: "ST", type: "Test", location: "Lab 4", color: COLORS[1], recurrence: "none" },
+  { id: 7, title: "Group project check-in", course: "CS 218", day: "Friday", date: "2026-09-18", start: "11:00", end: "12:00", kind: "ST", type: "Study", location: "Student Hub", color: COLORS[2], recurrence: "weekly", recurrenceEnd: "2026-12-18" },
 ];
+const starterAssignments: Assignment[] = [{ id: 1, title: "Database design report", course: "CS 221", dueDate: "2026-09-18", priority: "High", duration: 5, progress: 35, status: "In Progress" }, { id: 2, title: "Network security quiz", course: "CS 218", dueDate: "2026-09-22", priority: "Medium", duration: 2, progress: 0, status: "Not Started" }];
 
-function toMinutes(time: string) {
-  const [hour, minute] = time.split(":").map(Number);
-  return hour * 60 + minute;
-}
+const pad = (value: number) => String(value).padStart(2, "0");
+const dateValue = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+const parseDate = (value: string) => new Date(`${value}T12:00:00`);
+const addDays = (value: string, days: number) => { const date = parseDate(value); date.setDate(date.getDate() + days); return dateValue(date); };
+const mondayOf = (value: string) => { const date = parseDate(value); const offset = (date.getDay() + 6) % 7; date.setDate(date.getDate() - offset); return dateValue(date); };
+const formatDate = (value: string) => { const date = parseDate(value); return `${date.getDate()} ${MONTHS_SHORT[date.getMonth()]} ${date.getFullYear()}`; };
+const toMinutes = (time: string) => { const [hour, minute] = time.split(":").map(Number); return hour * 60 + minute; };
+const sameWeekday = (a: string, b: string) => parseDate(a).getDay() === parseDate(b).getDay();
+const isOverdue = (item: Assignment, today: string) => item.status !== "Completed" && item.status !== "Submitted" && item.dueDate < today;
+function readStorage<T>(key: string, fallback: T): T { try { const stored = window.localStorage.getItem(key); return stored ? JSON.parse(stored) as T : fallback; } catch { return fallback; } }
+function normalizeEvent(event: Partial<PlannerEvent>): PlannerEvent { const date = event.date ?? INITIAL_DATE; return { id: event.id ?? Date.now(), title: event.title ?? "Untitled event", course: event.course ?? "Other", day: event.day ?? DAYS[Math.max(0, parseDate(date).getDay() - 1)], date, start: event.start ?? "09:00", end: event.end ?? "10:00", kind: event.kind ?? "LT", type: event.type ?? "Study", location: event.location ?? "Location TBA", color: event.color ?? COLORS[0], recurrence: event.recurrence ?? "none", recurrenceEnd: event.recurrenceEnd, seriesId: event.seriesId, excludedDates: event.excludedDates ?? [] }; }
+function eventsForDate(events: PlannerEvent[], date: string): DisplayEvent[] { return events.flatMap((event) => { const active = event.recurrence === "weekly" ? date >= event.date && (!event.recurrenceEnd || date <= event.recurrenceEnd) && sameWeekday(event.date, date) : event.date === date; if (!active || event.excludedDates?.includes(date)) return []; return [{ ...event, occurrenceDate: date }]; }); }
 
-function overlaps(a: PlannerEvent, b: PlannerEvent) {
-  return a.day === b.day && toMinutes(a.start) < toMinutes(b.end) && toMinutes(b.start) < toMinutes(a.end);
-}
+function Modal({ title, eyebrow, onClose, children }: { title: string; eyebrow: string; onClose: () => void; children: ReactNode }) { return <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-head"><div><p className="eyebrow">{eyebrow}</p><h2 id="modal-title">{title}</h2></div><button onClick={onClose} aria-label="Close">×</button></div>{children}</section></div>; }
+function FormActions({ label, onClose }: { label: string; onClose: () => void }) { return <div className="form-actions wide"><button type="button" onClick={onClose}>Cancel</button><button className="primary" type="submit">{label}</button></div>; }
+function SectionHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) { return <div className="section-heading"><div><h2>{title}</h2><p>{subtitle}</p></div>{action}</div>; }
 
-function EventCard({ event, compact = false, onDelete }: { event: PlannerEvent; compact?: boolean; onDelete: (id: number) => void }) {
-  return (
-    <article className={`event-card ${event.kind === "ST" ? "short-term" : ""} ${compact ? "compact" : ""}`} style={{ "--event-color": event.color } as React.CSSProperties}>
-      <div className="event-head">
-        <span className="course-pill">{event.course}</span>
-        <button className="delete-button" onClick={() => onDelete(event.id)} aria-label={`Delete ${event.title}`}>×</button>
-      </div>
-      <h3>{event.title}</h3>
-      <p>{event.start}–{event.end}</p>
-      {!compact && <p className="location">{event.location}</p>}
-      <span className="kind-label">{event.kind} · {event.type}</span>
-    </article>
-  );
-}
+function EventCard({ event, compact, onEdit, onDelete }: { event: DisplayEvent; compact?: boolean; onEdit: (event: DisplayEvent) => void; onDelete: (event: DisplayEvent) => void }) { return <article className={`event-card ${event.kind === "ST" ? "short-term" : ""} ${compact ? "compact" : ""}`} style={{ "--event-color": event.color } as React.CSSProperties}><div className="event-head"><span className="course-pill">{event.course}</span><div className="event-actions"><button onClick={() => onEdit(event)} aria-label={`Edit ${event.title}`}>Edit</button><button className="delete-button" onClick={() => onDelete(event)} aria-label={`Delete ${event.title}`}>×</button></div></div><h3>{event.title}</h3><p>{event.start}–{event.end}</p>{!compact && <p className="location">{event.location}</p>}<span className="kind-label">{event.kind} · {event.type}{event.recurrence === "weekly" ? " · Weekly" : ""}</span></article>; }
+
+function EventForm({ item, courses, initialDate, onSubmit, onClose }: { item?: DisplayEvent; courses: Course[]; initialDate: string; onSubmit: (draft: EventDraft) => void; onClose: () => void }) { function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const date = String(form.get("date")); const start = String(form.get("start")); const end = String(form.get("end")); if (!String(form.get("title")).trim() || toMinutes(end) <= toMinutes(start)) return; onSubmit({ id: item?.id, title: String(form.get("title")).trim(), course: String(form.get("course")), day: DAYS[(parseDate(date).getDay() + 6) % 7], date, start, end, kind: form.get("kind") as EventKind, type: String(form.get("type")), location: String(form.get("location")) || "Location TBA", color: item?.color ?? COLORS[0], recurrence: form.get("recurrence") as Recurrence, recurrenceEnd: String(form.get("recurrenceEnd")) || undefined, seriesId: item?.seriesId, excludedDates: item?.excludedDates }); }
+  return <Modal title={item ? "Edit event" : "Add a new event"} eyebrow="BUILD YOUR SCHEDULE" onClose={onClose}><form onSubmit={submit}><label className="wide">Event title<input name="title" defaultValue={item?.title} required /></label><label>Course<select name="course" defaultValue={item?.course ?? courses[0]?.code ?? "Other"}>{courses.length ? courses.map((course) => <option key={course.id}>{course.code}</option>) : <option>Other</option>}</select></label><label>Category<select name="kind" defaultValue={item?.kind ?? "LT"}><option value="LT">Long term (LT)</option><option value="ST">Short term (ST)</option></select></label><label>Date<input name="date" type="date" defaultValue={item?.occurrenceDate ?? initialDate} required /></label><label>Event type<select name="type" defaultValue={item?.type ?? "Lecture"}>{["Lecture", "Tutorial", "Lab", "PASS", "Makeup", "Assignment", "Test", "Exam", "Study", "Personal"].map((type) => <option key={type}>{type}</option>)}</select></label><label>Starts<input name="start" type="time" defaultValue={item?.start ?? "09:00"} required /></label><label>Ends<input name="end" type="time" defaultValue={item?.end ?? "10:00"} required /></label><label className="wide">Location<input name="location" defaultValue={item?.location} placeholder="Building or room" /></label><label>Repeat<select name="recurrence" defaultValue={item?.recurrence ?? "none"}><option value="none">One time</option><option value="weekly">Every week</option></select></label><label>Recurrence ends<input name="recurrenceEnd" type="date" defaultValue={item?.recurrenceEnd} /></label><FormActions label={item ? "Save changes" : "Add to schedule"} onClose={onClose} /></form></Modal>; }
+
+function AssignmentForm({ item, courses, onSubmit, onClose }: { item?: Assignment; courses: Course[]; onSubmit: (item: Assignment) => void; onClose: () => void }) { function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); onSubmit({ id: item?.id ?? Date.now(), title: String(form.get("title")).trim(), course: String(form.get("course")), dueDate: String(form.get("dueDate")), priority: form.get("priority") as Priority, duration: Number(form.get("duration")), progress: Number(form.get("progress")), status: form.get("status") as AssignmentStatus }); } return <Modal title={item ? "Edit assignment" : "Add assignment"} eyebrow="KEEP MOVING" onClose={onClose}><form onSubmit={submit}><label className="wide">Title<input name="title" defaultValue={item?.title} required /></label><label>Course<select name="course" defaultValue={item?.course ?? courses[0]?.code ?? "Other"}>{courses.length ? courses.map((course) => <option key={course.id}>{course.code}</option>) : <option>Other</option>}</select></label><label>Due date<input name="dueDate" type="date" defaultValue={item?.dueDate ?? INITIAL_DATE} required /></label><label>Priority<select name="priority" defaultValue={item?.priority ?? "Medium"}>{["Low", "Medium", "High"].map((value) => <option key={value}>{value}</option>)}</select></label><label>Estimated hours<input name="duration" type="number" min="0" step="0.5" defaultValue={item?.duration ?? 2} required /></label><label>Progress (%)<input name="progress" type="number" min="0" max="100" defaultValue={item?.progress ?? 0} required /></label><label className="wide">Status<select name="status" defaultValue={item?.status ?? "Not Started"}>{["Not Started", "In Progress", "Ready to Submit", "Submitted", "Completed"].map((value) => <option key={value}>{value}</option>)}</select></label><FormActions label={item ? "Save changes" : "Add assignment"} onClose={onClose} /></form></Modal>; }
+function CourseForm({ item, onSubmit, onClose }: { item?: Course; onSubmit: (item: Course) => void; onClose: () => void }) { function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); onSubmit({ id: item?.id ?? Date.now(), name: String(form.get("name")).trim(), code: String(form.get("code")).trim().toUpperCase(), color: String(form.get("color")), lecturer: String(form.get("lecturer")), tutor: String(form.get("tutor")), location: String(form.get("location")), notes: String(form.get("notes")) }); } return <Modal title={item ? "Edit course" : "Add course"} eyebrow="YOUR STUDIES" onClose={onClose}><form onSubmit={submit}><label className="wide">Course name<input name="name" defaultValue={item?.name} required /></label><label>Course code<input name="code" defaultValue={item?.code} required /></label><label>Colour<input name="color" type="color" defaultValue={item?.color ?? COLORS[0]} /></label><label>Lecturer<input name="lecturer" defaultValue={item?.lecturer} /></label><label>Tutor<input name="tutor" defaultValue={item?.tutor} /></label><label>Location<input name="location" defaultValue={item?.location} /></label><label className="wide">Notes<textarea name="notes" defaultValue={item?.notes} rows={3} /></label><FormActions label={item ? "Save changes" : "Add course"} onClose={onClose} /></form></Modal>; }
+
+function WeekControls({ weekStart, onChange }: { weekStart: string; onChange: (date: string) => void }) { const end = addDays(weekStart, 4); return <div className="week-controls"><button aria-label="Previous week" onClick={() => onChange(addDays(weekStart, -7))}>←</button><button onClick={() => onChange(mondayOf(dateValue(new Date())))}>Today</button><strong>{formatDate(weekStart)} – {formatDate(end)}</strong><button aria-label="Next week" onClick={() => onChange(addDays(weekStart, 7))}>→</button></div>; }
+function WeekView({ weekStart, events, filter, onFilter, onChangeWeek, onAdd, onEdit, onDelete }: { weekStart: string; events: PlannerEvent[]; filter: "ALL" | EventKind; onFilter: (value: "ALL" | EventKind) => void; onChangeWeek: (date: string) => void; onAdd: (date: string) => void; onEdit: (event: DisplayEvent) => void; onDelete: (event: DisplayEvent) => void }) { return <><section className="hero-grid"><div className="next-up"><div><p className="eyebrow">WEEK IN VIEW</p><h2>Make room for what matters.</h2><p>{formatDate(weekStart)} to {formatDate(addDays(weekStart, 4))}</p></div><div className="time-block"><strong>{eventsForDate(events, weekStart).length}</strong><span>events</span></div></div><div className="focus-card"><div className="focus-icon">◎</div><div><p className="eyebrow">SMART SUGGESTION</p><h3>Plan a focused study block</h3><p>Turn an open gap into progress.</p></div><button onClick={() => onAdd(weekStart)}>Plan it</button></div></section><section className="planner-section"><div className="section-heading"><div><h2>Weekly timetable</h2><p>Long-term and short-term commitments</p></div><div className="filters" aria-label="Filter events">{["ALL", "LT", "ST"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => onFilter(item as "ALL" | EventKind)}>{item === "ALL" ? "All events" : item === "LT" ? "Long term" : "Short term"}</button>)}</div></div><WeekControls weekStart={weekStart} onChange={onChangeWeek} /><div className="week-grid">{DAYS.map((day, index) => { const date = addDays(weekStart, index); const dayEvents = eventsForDate(events, date).filter((event) => filter === "ALL" || event.kind === filter).sort((a, b) => a.start.localeCompare(b.start)); return <div className="day-column" key={day}><div className="day-head"><span>{SHORT_DAYS[index]}</span><strong>{parseDate(date).getDate()}</strong></div><div className="day-events">{dayEvents.map((event) => <EventCard key={`${event.id}-${event.occurrenceDate}`} event={event} onEdit={onEdit} onDelete={onDelete} />)}{!dayEvents.length && <button className="empty-day" onClick={() => onAdd(date)}>＋ Add something</button>}</div></div>; })}</div></section></>; }
+
+function CalendarView({ month, events, selectedDate, onMonth, onSelect, onAdd, onEdit, onDelete }: { month: Date; events: PlannerEvent[]; selectedDate: string; onMonth: (date: Date) => void; onSelect: (date: string) => void; onAdd: (date: string) => void; onEdit: (event: DisplayEvent) => void; onDelete: (event: DisplayEvent) => void }) { const first = new Date(month.getFullYear(), month.getMonth(), 1); const start = new Date(first); start.setDate(1 - first.getDay()); const days = Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); return date; }); const selected = eventsForDate(events, selectedDate); return <section className="calendar-section"><div className="calendar-toolbar"><div className="calendar-nav"><button aria-label="Previous month" onClick={() => onMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>←</button><h2>{MONTHS_LONG[month.getMonth()]} {month.getFullYear()}</h2><button aria-label="Next month" onClick={() => onMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>→</button></div><button className="secondary-action" onClick={() => { const date = dateValue(new Date()); onMonth(parseDate(date)); onSelect(date); }}>Today</button></div><div className="calendar-grid"><div className="calendar-weekdays">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}</div><div className="calendar-days">{days.map((date) => { const value = dateValue(date); const dayEvents = eventsForDate(events, value); return <button key={value} className={`calendar-day ${date.getMonth() === month.getMonth() ? "" : "muted-day"} ${selectedDate === value ? "selected-day" : ""}`} onClick={() => onSelect(value)}><strong>{date.getDate()}</strong>{dayEvents.slice(0, 2).map((event) => <span key={`${event.id}-${value}`} style={{ "--event-color": event.color } as React.CSSProperties}>{event.title}</span>)}</button>; })}</div></div><div className="selected-day-panel"><SectionHeader title={formatDate(selectedDate)} subtitle={`${selected.length} event${selected.length === 1 ? "" : "s"}`} action={<button className="secondary-action" onClick={() => onAdd(selectedDate)}>＋ Add event</button>} />{selected.length ? selected.map((event) => <EventCard key={`${event.id}-${event.occurrenceDate}`} event={event} compact onEdit={onEdit} onDelete={onDelete} />) : <div className="empty-state"><strong>No events planned</strong><p>Give this day a little shape.</p><button className="primary" onClick={() => onAdd(selectedDate)}>＋ Add event</button></div>}</div></section>; }
+
+function AssignmentsView({ items, today, onAdd, onEdit, onDelete, onStatus }: { items: Assignment[]; today: string; onAdd: () => void; onEdit: (item: Assignment) => void; onDelete: (id: string | number) => void; onStatus: (id: string | number, status: AssignmentStatus) => void }) { return <section className="content-section"><SectionHeader title="Assignments" subtitle={`${items.length} pieces of work in your queue`} action={<button className="secondary-action" onClick={onAdd}>＋ Add assignment</button>} />{items.length ? <div className="assignment-list">{items.map((item) => { const overdue = isOverdue(item, today); return <article className={`assignment-card ${overdue ? "is-overdue" : ""}`} key={item.id}><div className="assignment-main"><div className="assignment-title"><span className={`priority ${item.priority.toLowerCase()}`}>{item.priority}</span><h3>{item.title}</h3></div><p>{item.course} · Due {formatDate(item.dueDate)} · {item.duration}h estimated</p><div className="assignment-progress"><span style={{ width: `${item.progress}%` }} /><small>{item.progress}% complete</small></div></div><div className="assignment-actions"><span className="status-label">{overdue ? "Overdue" : item.status}</span><select aria-label={`Change status for ${item.title}`} value={item.status} onChange={(event) => onStatus(item.id, event.target.value as AssignmentStatus)}>{["Not Started", "In Progress", "Ready to Submit", "Submitted", "Completed"].map((status) => <option key={status}>{status}</option>)}</select><button onClick={() => onEdit(item)}>Edit</button><button className="danger-action" onClick={() => onDelete(item.id)}>Delete</button></div></article>; })}</div> : <div className="empty-state"><strong>No assignments yet</strong><p>Keep deadlines, effort, and progress in one calm view.</p><button className="primary" onClick={onAdd}>＋ Add assignment</button></div>}</section>; }
+function CoursesView({ items, onAdd, onEdit, onDelete }: { items: Course[]; onAdd: () => void; onEdit: (item: Course) => void; onDelete: (id: string | number) => void }) { return <section className="content-section"><SectionHeader title="Courses" subtitle={`${items.length} course${items.length === 1 ? "" : "s"} this semester`} action={<button className="secondary-action" onClick={onAdd}>＋ Add course</button>} />{items.length ? <div className="course-grid">{items.map((item) => <article className="course-card" key={item.id} style={{ "--course-color": item.color } as React.CSSProperties}><div className="course-accent" /><div className="course-card-head"><span>{item.code}</span><div><button onClick={() => onEdit(item)}>Edit</button><button className="danger-action" onClick={() => onDelete(item.id)}>Delete</button></div></div><h3>{item.name}</h3><dl><div><dt>Lecturer</dt><dd>{item.lecturer || "Not set"}</dd></div><div><dt>Tutor</dt><dd>{item.tutor || "Not set"}</dd></div><div><dt>Location</dt><dd>{item.location || "Not set"}</dd></div></dl>{item.notes && <p className="course-notes">{item.notes}</p>}</article>)}</div> : <div className="empty-state"><strong>Your course shelf is empty</strong><p>Add courses so events and assignments can use their codes.</p><button className="primary" onClick={onAdd}>＋ Add course</button></div>}</section>; }
 
 export default function Home() {
+  const [supabase, setSupabase] = useState<SupabaseClient<Database> | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
+  const [plannerData, setPlannerData] = useState<PlannerData | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [section, setSection] = useState<Section>("week");
   const [events, setEvents] = useState<PlannerEvent[]>(starterEvents);
+  const [assignments, setAssignments] = useState<Assignment[]>(starterAssignments);
+  const [courses, setCourses] = useState<Course[]>([]);
   const [ready, setReady] = useState(false);
+  const [today, setToday] = useState(INITIAL_DATE);
+  const [weekStart, setWeekStart] = useState(INITIAL_DATE);
   const [filter, setFilter] = useState<"ALL" | EventKind>("ALL");
-  const [showForm, setShowForm] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(parseDate("2026-09-01"));
+  const [selectedDate, setSelectedDate] = useState(INITIAL_DATE);
+  const [eventForm, setEventForm] = useState<{ item?: DisplayEvent; date: string; scope?: SeriesScope } | null>(null);
+  const [assignmentForm, setAssignmentForm] = useState<Assignment | null>(null);
+  const [courseForm, setCourseForm] = useState<Course | null>(null);
   const [notice, setNotice] = useState("");
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem("unistack-events");
-    if (saved) setEvents(JSON.parse(saved));
-    setReady(true);
+    try {
+      const client = getSupabaseBrowserClient();
+      const initialize = window.setTimeout(() => setSupabase(client), 0);
+      const authParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      if (authParams.get("error") || authParams.get("error_description")) {
+        setAuthMessage("This password-reset link is invalid or has expired. Request a new one below.");
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+      client.auth.getSession().then(({ data, error }) => {
+        if (error) setAuthError("Supabase could not restore your session.");
+        setSession(data.session);
+        setAuthReady(true);
+      });
+      const { data: listener } = client.auth.onAuthStateChange((event, nextSession) => {
+        if (event === "PASSWORD_RECOVERY" && nextSession) {
+          setPasswordRecovery(true);
+          setAuthMessage("");
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+        setSession(nextSession);
+        setAuthReady(true);
+      });
+      return () => { window.clearTimeout(initialize); listener.subscription.unsubscribe(); };
+    } catch (error) {
+      const failure = window.setTimeout(() => { setAuthError(error instanceof Error ? error.message : "Supabase is not configured."); setAuthReady(true); }, 0);
+      return () => window.clearTimeout(failure);
+    }
   }, []);
 
   useEffect(() => {
-    if (ready) window.localStorage.setItem("unistack-events", JSON.stringify(events));
-  }, [events, ready]);
+    if (!supabase || !session?.user) return;
+    loadPlannerData(supabase, session.user.id).then(setPlannerData).catch(() => setAuthError("Your account data could not be loaded. Run the Supabase migration, then try again."));
+  }, [supabase, session]);
 
-  const visibleEvents = useMemo(() => events.filter((event) => filter === "ALL" || event.kind === filter), [events, filter]);
-  const todayEvents = visibleEvents.filter((event) => event.day === "Monday").sort((a, b) => a.start.localeCompare(b.start));
+  useEffect(() => { const hydration = window.setTimeout(() => { const current = dateValue(new Date()); const currentWeek = mondayOf(current); setEvents(readStorage<PlannerEvent[]>("unistack-events", starterEvents).map(normalizeEvent)); setAssignments(readStorage("unistack-assignments", starterAssignments)); setCourses(readStorage("unistack-courses", [])); setToday(current); setWeekStart(currentWeek); setSelectedDate(current); setCalendarMonth(parseDate(`${current.slice(0, 7)}-01`)); setReady(true); }, 0); return () => window.clearTimeout(hydration); }, []);
+  useEffect(() => { if (!plannerData) return; const cloudHydration = window.setTimeout(() => { setEvents(plannerData.events.map((event) => normalizeEvent({ id: event.id, title: event.title, course: plannerData.courses.find((course) => course.id === event.course_id)?.code ?? "Other", day: DAYS[(parseDate(event.event_date).getDay() + 6) % 7], date: event.event_date, start: event.start_time.slice(0, 5), end: event.end_time.slice(0, 5), kind: event.term_type, type: event.event_type, location: event.location ?? "Location TBA", color: event.color ?? COLORS[0], recurrence: event.recurrence_type, recurrenceEnd: event.recurrence_end_date ?? undefined, seriesId: event.recurrence_group_id ?? undefined }))); setAssignments(plannerData.assignments.map((item) => ({ id: item.id, title: item.title, course: plannerData.courses.find((course) => course.id === item.course_id)?.code ?? "Other", dueDate: item.due_date, priority: item.priority, duration: Number(item.estimated_hours ?? 0), progress: item.progress, status: item.status }))); setCourses(plannerData.courses.map((course) => ({ id: course.id, name: course.name, code: course.code, color: course.color, lecturer: course.lecturer ?? "", tutor: course.tutor ?? "", location: course.location ?? "", notes: course.notes ?? "" }))); setReady(true); }, 0); return () => window.clearTimeout(cloudHydration); }, [plannerData]);
+  useEffect(() => { if (ready) window.localStorage.setItem("unistack-events", JSON.stringify(events)); }, [events, ready]);
+  useEffect(() => { if (ready) window.localStorage.setItem("unistack-assignments", JSON.stringify(assignments)); }, [assignments, ready]);
+  useEffect(() => { if (ready) window.localStorage.setItem("unistack-courses", JSON.stringify(courses)); }, [courses, ready]);
 
-  function addEvent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const kind = form.get("kind") as EventKind;
-    const next: PlannerEvent = {
-      id: Date.now(), title: String(form.get("title")), course: String(form.get("course")),
-      day: String(form.get("day")), start: String(form.get("start")), end: String(form.get("end")),
-      kind, type: String(form.get("type")), location: String(form.get("location")) || "Location TBA",
-      color: COLORS[events.length % COLORS.length],
-    };
-    if (toMinutes(next.end) <= toMinutes(next.start)) {
-      setNotice("End time must be later than the start time.");
-      return;
-    }
-    const clash = events.find((existing) => overlaps(existing, next));
-    setEvents((current) => [...current, next]);
-    setNotice(clash ? `Saved — heads up, this overlaps with ${clash.title}.` : "Event added to your week.");
-    event.currentTarget.reset();
-    setTimeout(() => setShowForm(false), 650);
-  }
+  const upcomingDeadlines = useMemo(() => assignments.filter((item) => item.status !== "Completed").sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 5), [assignments]);
+  const heading = section === "week" ? "Your week, at a glance." : section === "calendar" ? "Your calendar, in full." : section === "assignments" ? "Make progress visible." : "Know your courses.";
+  const refreshCloud = async () => { if (!supabase || !session) return; setPlannerData(await loadPlannerData(supabase, session.user.id)); };
+  const saveEvent = async (draft: EventDraft) => { const item = normalizeEvent({ ...draft, id: draft.id ?? Date.now(), seriesId: draft.seriesId ?? (draft.recurrence === "weekly" ? Date.now() : undefined) }); const conflict = eventsForDate(events, item.date).find((existing) => existing.id !== draft.id && toMinutes(existing.start) < toMinutes(item.end) && toMinutes(item.start) < toMinutes(existing.end)); try { if (supabase && session) { const courseId = courses.find((course) => course.code === item.course)?.id; const payload = { course_id: typeof courseId === "string" ? courseId : null, title: item.title, event_type: item.type, term_type: item.kind, event_date: item.date, start_time: item.start, end_time: item.end, location: item.location, notes: null, color: item.color, recurrence_type: item.recurrence, recurrence_end_date: item.recurrenceEnd ?? null, recurrence_group_id: typeof item.seriesId === "string" ? item.seriesId : null }; if (typeof draft.id === "string") await updateEvent(supabase, draft.id, payload); else await createEvent(supabase, session.user.id, payload); await refreshCloud(); } else setEvents((current) => draft.id ? current.map((event) => event.id === draft.id ? item : event) : [...current, item]); setEventForm(null); setNotice(conflict ? `Saved — heads up, this overlaps with ${conflict.title}.` : draft.id ? "Event updated." : "Event added to your week."); } catch { setNotice("Could not save the event."); } };
+  const deleteEvent = (event: DisplayEvent) => { const series = event.recurrence === "weekly"; const choice = series ? window.prompt("Delete event: type occurrence, future, or series", "occurrence") : "series"; if (!choice) return; setEvents((current) => { if (choice === "series") return current.filter((item) => item.id !== event.id && item.seriesId !== event.seriesId); if (choice === "future") return current.map((item) => item.id === event.id ? { ...item, recurrenceEnd: addDays(event.occurrenceDate, -1) } : item); if (choice === "occurrence") return current.map((item) => item.id === event.id ? { ...item, excludedDates: [...(item.excludedDates ?? []), event.occurrenceDate] } : item); return current; }); setNotice("Event removed."); };
+  const editEvent = (event: DisplayEvent) => { const scope = event.recurrence === "weekly" ? window.prompt("Edit event: type occurrence, future, or series", "series") : "series"; if (scope === "occurrence" || scope === "future" || scope === "series") setEventForm({ item: event, date: event.occurrenceDate, scope }); };
+  const addEvent = (date: string) => setEventForm({ date });
+  const deleteAssignment = async (id: string | number) => { if (!window.confirm("Delete this assignment?")) return; try { if (supabase && typeof id === "string") { await deleteCloudAssignment(supabase, id); await refreshCloud(); } else setAssignments((current) => current.filter((item) => item.id !== id)); } catch { setNotice("Could not delete the assignment."); } };
+  const deleteCourse = async (id: string | number) => { if (!window.confirm("Delete this course? Existing events and assignments are kept.")) return; try { if (supabase && typeof id === "string") { await deleteCloudCourse(supabase, id); await refreshCloud(); } else setCourses((current) => current.filter((item) => item.id !== id)); } catch { setNotice("Could not delete the course."); } };
+  const addAssignment = () => setAssignmentForm({} as Assignment);
+  const addCourse = () => setCourseForm({} as Course);
+  const dayEvents = eventsForDate(events, weekStart);
 
-  function deleteEvent(id: number) {
-    setEvents((current) => current.filter((event) => event.id !== id));
-    setNotice("Event removed.");
-  }
+  if (!authReady) return <main className="auth-loading"><div className="brand"><span>U</span><strong>UniStack</strong></div><p>Checking your study space…</p></main>;
+  if (authError && !supabase) return <main className="auth-loading"><div className="auth-error"><strong>Supabase configuration needed</strong><p>{authError}</p><small>Copy .env.example to .env.local, add your project values, and restart the dev server.</small></div></main>;
+  if (passwordRecovery && supabase) return <AuthScreen client={supabase} mode="reset" onResetComplete={() => { setPasswordRecovery(false); setSession(null); }} />;
+  if (!session || !supabase) return <AuthScreen client={supabase ?? (() => { throw new Error("Supabase is not configured."); })()} initialMessage={authMessage}/>;
 
-  return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span>U</span><strong>UniStack</strong></div>
-        <nav aria-label="Main navigation">
-          <button className="nav-item active"><span>▦</span> My week</button>
-          <button className="nav-item"><span>○</span> Calendar</button>
-          <button className="nav-item"><span>✓</span> Assignments <b>3</b></button>
-          <button className="nav-item"><span>◇</span> Courses</button>
-        </nav>
-        <div className="semester-card">
-          <p>SEMESTER PROGRESS</p><strong>Week 7 of 14</strong>
-          <div className="progress"><span /></div><small>7 weeks to finals</small>
-        </div>
-        <div className="profile"><div className="avatar">JV</div><div><strong>Juta</strong><small>Student plan</small></div><button aria-label="Open settings">•••</button></div>
-      </aside>
-
-      <section className="main-content">
-        <header className="topbar">
-          <div><p className="eyebrow">MONDAY, 14 SEPTEMBER</p><h1>Your week, at a glance.</h1></div>
-          <div className="top-actions"><button className="icon-button" aria-label="Notifications">♢<i /></button><button className="primary" onClick={() => { setNotice(""); setShowForm(true); }}>＋ Add event</button></div>
-        </header>
-
-        <section className="hero-grid">
-          <div className="next-up">
-            <div><p className="eyebrow">NEXT UP · IN 42 MINUTES</p><h2>Algorithms lecture</h2><p>CS 214 · ICT Theatre 2</p></div>
-            <div className="time-block"><strong>9:00</strong><span>AM</span></div>
-            <button aria-label="Open next event">↗</button>
-          </div>
-          <div className="focus-card"><div className="focus-icon">◎</div><div><p className="eyebrow">SMART SUGGESTION</p><h3>You have a 90-minute gap</h3><p>Good time to review Database notes.</p></div><button>Plan it</button></div>
-        </section>
-
-        <section className="planner-section">
-          <div className="section-heading">
-            <div><h2>Weekly timetable</h2><p>14–18 September</p></div>
-            <div className="filters" aria-label="Filter events">
-              {(["ALL", "LT", "ST"] as const).map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item === "ALL" ? "All events" : item === "LT" ? "Long term" : "Short term"}</button>)}
-            </div>
-          </div>
-          <div className="week-grid">
-            {DAYS.map((day, index) => (
-              <div className="day-column" key={day}>
-                <div className={`day-head ${index === 0 ? "today" : ""}`}><span>{SHORT_DAYS[index]}</span><strong>{14 + index}</strong></div>
-                <div className="day-events">
-                  {visibleEvents.filter((event) => event.day === day).sort((a, b) => a.start.localeCompare(b.start)).map((event) => <EventCard key={event.id} event={event} onDelete={deleteEvent} />)}
-                  {!visibleEvents.some((event) => event.day === day) && <button className="empty-day" onClick={() => setShowForm(true)}>＋ Add something</button>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="bottom-grid">
-          <div className="deadlines"><div className="section-heading"><div><h2>Coming up</h2><p>Deadlines that need attention</p></div><button>View all →</button></div>
-            <div className="deadline-row"><div className="date-chip"><b>18</b><span>SEP</span></div><div><strong>Database design report</strong><p>CS 221 · Assignment</p></div><span className="priority urgent">4 days</span></div>
-            <div className="deadline-row"><div className="date-chip"><b>22</b><span>SEP</span></div><div><strong>Network security quiz</strong><p>CS 218 · Test</p></div><span className="priority">8 days</span></div>
-          </div>
-          <div className="today"><div className="section-heading"><div><h2>Today</h2><p>{todayEvents.length} scheduled events</p></div></div>{todayEvents.map((event) => <EventCard key={event.id} compact event={event} onDelete={deleteEvent} />)}</div>
-        </section>
-      </section>
-
-      {showForm && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowForm(false)}>
-        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="new-event-title">
-          <div className="modal-head"><div><p className="eyebrow">BUILD YOUR SCHEDULE</p><h2 id="new-event-title">Add a new event</h2></div><button onClick={() => setShowForm(false)} aria-label="Close">×</button></div>
-          <form onSubmit={addEvent}>
-            <label className="wide">Event title<input name="title" placeholder="e.g. Software Engineering lecture" required /></label>
-            <label>Course<input name="course" placeholder="CS 215" required /></label>
-            <label>Category<select name="kind"><option value="LT">Long term (LT)</option><option value="ST">Short term (ST)</option></select></label>
-            <label>Day<select name="day">{DAYS.map((day) => <option key={day}>{day}</option>)}</select></label>
-            <label>Event type<select name="type">{["Lecture", "Tutorial", "Lab", "PASS", "Makeup", "Assignment", "Test", "Exam", "Study", "Personal"].map((type) => <option key={type}>{type}</option>)}</select></label>
-            <label>Starts<input name="start" type="time" defaultValue="09:00" required /></label>
-            <label>Ends<input name="end" type="time" defaultValue="10:00" required /></label>
-            <label className="wide">Location<input name="location" placeholder="Building or room" /></label>
-            {notice && <p className="form-notice wide">{notice}</p>}
-            <div className="form-actions wide"><button type="button" onClick={() => setShowForm(false)}>Cancel</button><button className="primary" type="submit">Add to schedule</button></div>
-          </form>
-        </section>
-      </div>}
-      {notice && !showForm && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
-    </main>
-  );
+  return <main className="app-shell"><aside className="sidebar"><div className="brand"><span>U</span><strong>UniStack</strong></div><nav aria-label="Main navigation">{NAV_ITEMS.map((item) => <button key={item.id} className={`nav-item ${section === item.id ? "active" : ""}`} onClick={() => setSection(item.id)} aria-current={section === item.id ? "page" : undefined}><span>{item.icon}</span>{item.label}{item.id === "assignments" && assignments.length > 0 && <b>{assignments.length}</b>}</button>)}</nav><div className="semester-card"><p>SEMESTER PROGRESS</p><strong>Week 7 of 14</strong><div className="progress"><span /></div><small>7 weeks to finals</small></div><button className="profile" onClick={() => setProfileOpen(true)} aria-label="Open profile and settings"><div className="avatar">{(plannerData?.profile?.full_name || session.user.email || "U").split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div><strong>{plannerData?.profile?.full_name || session.user.email}</strong><small>Profile and settings</small></div></button></aside><section className="main-content"><header className="topbar"><div><p className="eyebrow">{formatDate(today).toUpperCase()}</p><h1>{heading}</h1></div><div className="top-actions"><button className="icon-button" aria-label="Open notifications" onClick={() => setNotificationsOpen((open) => !open)}>♢<i /></button>{section === "week" || section === "calendar" ? <button className="primary" onClick={() => addEvent(section === "calendar" ? selectedDate : weekStart)}>＋ Add event</button> : section === "assignments" ? <button className="primary" onClick={addAssignment}>＋ Add assignment</button> : <button className="primary" onClick={addCourse}>＋ Add course</button>}</div>{notificationsOpen && <div className="notification-panel" role="status"><strong>Upcoming deadlines</strong>{upcomingDeadlines.length ? upcomingDeadlines.map((item) => <p key={item.id}>{item.title}<span>{formatDate(item.dueDate)}</span></p>) : <p>No deadlines yet.</p>}</div>}</header>{section === "week" && <WeekView weekStart={weekStart} events={events} filter={filter} onFilter={setFilter} onChangeWeek={(date) => { setWeekStart(date); setSelectedDate(date); }} onAdd={addEvent} onEdit={editEvent} onDelete={deleteEvent} />}{section === "calendar" && <CalendarView month={calendarMonth} events={events} selectedDate={selectedDate} onMonth={setCalendarMonth} onSelect={setSelectedDate} onAdd={addEvent} onEdit={editEvent} onDelete={deleteEvent} />}{section === "assignments" && <AssignmentsView items={assignments} today={today} onAdd={addAssignment} onEdit={setAssignmentForm} onDelete={deleteAssignment} onStatus={(id, status) => setAssignments((current) => current.map((item) => item.id === id ? { ...item, status } : item))} />}{section === "courses" && <CoursesView items={courses} onAdd={addCourse} onEdit={setCourseForm} onDelete={deleteCourse} />}{section === "week" && <section className="bottom-grid"><div className="deadlines"><SectionHeader title="Coming up" subtitle="Deadlines that need attention" action={<button onClick={() => setSection("assignments")}>View all →</button>} />{assignments.slice(0, 3).map((item) => <div className="deadline-row" key={item.id}><div className="date-chip"><b>{parseDate(item.dueDate).getDate()}</b><span>{MONTHS_SHORT[parseDate(item.dueDate).getMonth()]}</span></div><div><strong>{item.title}</strong><p>{item.course} · Assignment</p></div><span className="priority">{formatDate(item.dueDate)}</span></div>)}</div><div className="today"><SectionHeader title="This week" subtitle={`${dayEvents.length} events on Monday`} />{dayEvents.slice(0, 3).map((event) => <EventCard key={`${event.id}-${event.occurrenceDate}`} compact event={event} onEdit={editEvent} onDelete={deleteEvent} />)}</div></section>}</section>{eventForm && <EventForm item={eventForm.item} courses={courses} initialDate={eventForm.date} onSubmit={saveEvent} onClose={() => setEventForm(null)} />}{assignmentForm && <AssignmentForm item={assignmentForm.id ? assignmentForm : undefined} courses={courses} onSubmit={(item) => { setAssignments((current) => current.some((existing) => existing.id === item.id) ? current.map((existing) => existing.id === item.id ? item : existing) : [...current, item]); setAssignmentForm(null); setNotice("Assignment saved."); }} onClose={() => setAssignmentForm(null)} />}{courseForm && <CourseForm item={courseForm.id ? courseForm : undefined} onSubmit={(item) => { setCourses((current) => current.some((existing) => existing.id === item.id) ? current.map((existing) => existing.id === item.id ? item : existing) : [...current, item]); setCourseForm(null); setNotice("Course saved."); }} onClose={() => setCourseForm(null)} />}{profileOpen && plannerData && <ProfilePanel client={supabase} user={session.user} profile={plannerData.profile} data={plannerData} onSaved={(profile) => setPlannerData((current) => current ? { ...current, profile } : current)} onClose={() => setProfileOpen(false)} />}{plannerData && <MigrationPrompt client={supabase} user={session.user} data={plannerData} onComplete={() => setPlannerData((current) => current)} />}{notice && !eventForm && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")} aria-label="Dismiss notification">×</button></div>}</main>;
 }
